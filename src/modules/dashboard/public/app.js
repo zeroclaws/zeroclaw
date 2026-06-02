@@ -361,16 +361,24 @@
   }
 
   function settingsView() {
+    const chat = state.config?.chat || { enabled: true, systemPrompt: '', historyLimit: 20 };
+    const chatForm = el('form', { class: 'stack' }, [
+      el('label', { class: 'toggle-item' }, [el('span', { text: 'Enable chat endpoint' }), el('input', { class: 'switch', type: 'checkbox', name: 'enabled', checked: chat.enabled !== false })]),
+      input('System prompt / agent guidance', 'systemPrompt', chat.systemPrompt || '', { textarea: true, placeholder: 'Optional. If empty, backend uses Zeroclaw default agent guidance.' }),
+      input('History limit', 'historyLimit', String(chat.historyLimit || 20), { type: 'number', min: '1', max: '100' }),
+      el('p', { class: 'muted', text: 'Saved server-side. The backend owns the system prompt; user chat messages cannot override it with a system role.' }),
+      el('button', { class: 'primary', type: 'submit', text: 'Save chat guidance' })
+    ]);
+    chatForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(chatForm);
+      await save('/api/settings/chat', { enabled: fd.get('enabled') === 'on', systemPrompt: fd.get('systemPrompt')?.toString() || '', historyLimit: Number(fd.get('historyLimit') || 20) });
+    });
     return el('div', { class: 'grid' }, [
       card('Dashboard password', el('div', { class: 'stack' }, [
-        el('p', { class: 'muted', text: 'Password change controls are not available in this backend yet. Set ZEROCLAW_DASHBOARD_PASSWORD before starting the dashboard to replace the local bootstrap password.' }),
-        el('button', { class: 'ghost', disabled: true, text: 'Backend endpoint not available' })
+        el('p', { class: 'muted', text: 'Use POST /api/settings/password or set ZEROCLAW_DASHBOARD_PASSWORD before starting the dashboard to replace the local bootstrap password.' })
       ]), 'span-6'),
-      card('Chat system prompt', el('div', { class: 'stack' }, [
-        input('System prompt', 'chatSystemPrompt', '', { textarea: true, placeholder: 'No saved system prompt endpoint is available yet.', disabled: true }),
-        el('p', { class: 'muted', text: 'Chat prompt controls are shown as a safe placeholder because no dashboard API for reading or saving a system prompt exists in this build.' }),
-        el('button', { class: 'ghost', disabled: true, text: 'Backend endpoint not available' })
-      ]), 'span-6')
+      card('Chat system prompt', chatForm, 'span-6')
     ]);
   }
 
@@ -410,7 +418,8 @@
     const form = e.target; const text = new FormData(form).get('message')?.toString().trim(); if (!text) return;
     state.chatMessages.push({ role: 'user', content: text }); form.reset(); render();
     try {
-      const r = await api('/api/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
+      const history = state.chatMessages.slice(0, -1).filter((msg) => ['user', 'assistant'].includes(msg.role) && msg.content && !msg.cta).slice(-((state.config?.chat?.historyLimit || 20) * 2));
+      const r = await api('/api/chat', { method: 'POST', body: JSON.stringify({ message: text, messages: history }) });
       state.chatUsage = r.usage || state.chatUsage;
       if (r.mode === 'credential-error') {
         state.credentialHealth = r.credential || { status: 'invalid' };

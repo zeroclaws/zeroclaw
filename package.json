@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "tsx src/app/main.ts",
     "dev:cli": "tsx src/modules/cli/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-dashboard-assets.mjs",
     "start": "node dist/app/main.js",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test \"dist/**/*.test.js\"",

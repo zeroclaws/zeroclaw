@@ -13,6 +13,10 @@ export function envPath(): string {
   return join(dataDir(), 'zeroclaw.env');
 }
 
+export function secretsPath(): string {
+  return join(dataDir(), 'zeroclaw.secrets.json');
+}
+
 export function logPath(): string {
   return join(dataDir(), 'logs', 'zeroclaw.log');
 }

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Zeroclaw local agent runtime control dashboard">
+  <title>Zeroclaw Control</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#view">Skip to content</a>
+  <div class="shell" id="shell">
+    <aside class="sidebar" id="sidebar" aria-label="Zeroclaw navigation">
+      <a class="brand" href="/">
+        <span class="brand-mark">Z</span>
+        <span><strong>Zeroclaw</strong><small>local control</small></span>
+      </a>
+      <nav id="nav" class="nav" aria-label="Dashboard sections"></nav>
+      <div class="side-card">
+        <span class="dot" aria-hidden="true"></span>
+        <span><strong id="authState">locked</strong><small id="authHint">Masuk untuk akses API lokal.</small></span>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <p id="routeEyebrow" class="eyebrow">/login</p>
+          <h1 id="pageTitle">Masuk Zeroclaw</h1>
+        </div>
+        <div class="top-actions">
+          <button id="menuBtn" class="ghost menu-toggle" type="button" aria-controls="sidebar" aria-expanded="false" hidden>Menu</button>
+          <button id="refreshBtn" class="ghost" type="button" hidden>Refresh</button>
+          <button id="logoutBtn" class="danger" type="button" hidden>Logout</button>
+        </div>
+      </header>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <section id="view" class="view" aria-label="Dashboard content" tabindex="-1"></section>
+      <template id="loginTemplate">
+        <section class="login-panel" aria-labelledby="loginTitle">
+          <div class="login-orb" aria-hidden="true"><span></span><span></span><span></span></div>
+          <form id="loginForm" class="card login-card" autocomplete="on">
+            <div class="login-kicker">LOCAL ACCESS GATE</div>
+            <h2 id="loginTitle">Masuk ke Zeroclaw</h2>
+            <p class="muted">Dashboard ini hanya untuk kontrol runtime lokal. Password default <strong>123456</strong> adalah bootstrap/dev — ganti lewat environment sebelum dipakai serius.</p>
+            <div>
+              <label for="password">Password dashboard</label>
+              <input id="password" name="password" type="password" required autocomplete="current-password" autofocus placeholder="Masukkan password lokal">
+            </div>
+            <button class="primary login-submit" type="submit">Unlock dashboard</button>
+            <p id="loginStatus" class="login-status" role="status" aria-live="polite">Token disimpan hanya di sessionStorage browser ini.</p>
+          </form>
+        </section>
+      </template>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

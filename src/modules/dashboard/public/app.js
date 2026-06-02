@@ -2,7 +2,7 @@
   'use strict';
 
   const routes = [
-    ['/', 'Overview', 'status'], ['/provider', 'PROVIDER', 'provider'], ['/chat', 'Chat', 'chat'],
+    ['/', 'Overview', 'status'], ['/provider', 'PROVIDER', 'provider'], ['/9router', '9Router', '9r'], ['/chat', 'Chat', 'chat'],
     ['/channel', 'Telegram', 'tg'], ['/runtime', 'Runtime', 'power'], ['/logs', 'Logs', 'tail'],
     ['/doctor', 'Doctor', 'check'], ['/tools', 'Tools', 'toggle'], ['/review', 'Review', 'warn'],
     ['/settings', 'Settings', 'gear']
@@ -120,6 +120,7 @@
       card('Aksi awal', el('div', { class: 'row' }, [el('button', { class: 'primary', onclick: init, text: 'Init workspace' }), el('a', { class: 'ghost', href: '/provider', text: 'Setup provider' })]), 'span-4')
     ]),
     '/provider': () => providerView(),
+    '/9router': () => providerView(),
     '/chat': () => chatView(),
     '/channel': () => channelView(),
     '/runtime': () => el('div', { class: 'grid' }, [card('Runtime controls', el('div', { class: 'row' }, ['start','stop','restart'].map(a => el('button', { class: a === 'stop' ? 'danger ghost' : 'primary', onclick: () => runtime(a), text: title(a) }))), 'span-6'), card('Status API', pre(state.status), 'span-6')]),
@@ -478,7 +479,7 @@
       try { await loadBase(); state.credentialHealth = await api('/api/provider/credential-health'); await loadProviderModels(true); flash('OpenAI OAuth status refreshed. Models imported.'); } catch (_) {}
     }
     if (!views[location.pathname]) history.replaceState(null, '', '/');
-    if (location.pathname === '/provider') await loadProviderModels();
+    if (location.pathname === '/provider' || location.pathname === '/9router') await loadProviderModels();
     setAuth(); renderNav(); $('routeEyebrow').textContent = location.pathname; $('pageTitle').textContent = routes.find(r => r[0] === location.pathname)?.[1] || 'Overview';
     $('view').replaceChildren(views[location.pathname]());
   }

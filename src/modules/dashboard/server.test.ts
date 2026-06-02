@@ -38,7 +38,7 @@ test('login is public and status requires bearer token', async () => {
   }
 });
 
-test('settings shell route is an authenticated app page', async () => {
+test('settings and 9router shell routes are authenticated app pages', async () => {
   const app = await createDashboardServer({ password: '123456' });
   try {
     const loginPage = await app.inject({ method: 'GET', url: '/settings' });
@@ -46,9 +46,11 @@ test('settings shell route is an authenticated app page', async () => {
     assert.match(loginPage.body, /login/i);
 
     const token = await login(app);
-    const page = await app.inject({ method: 'GET', url: '/settings', headers: { authorization: `Bearer ${token}` } });
-    assert.equal(page.statusCode, 200);
-    assert.match(page.headers['content-type'] as string, /text\/html/);
+    for (const url of ['/settings', '/9router']) {
+      const page = await app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${token}` } });
+      assert.equal(page.statusCode, 200);
+      assert.match(page.headers['content-type'] as string, /text\/html/);
+    }
   } finally {
     await app.close();
   }

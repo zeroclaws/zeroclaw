@@ -20,8 +20,8 @@ import { deleteStoredCredential, resolveOAuthCredential, resolveSecretRef, saveO
 const DEFAULT_PASSWORD = '123456';
 const DEFAULT_OAUTH_CALLBACK_PORT = 1455;
 const scrypt = promisify(scryptCallback);
-const PUBLIC_PAGES = new Set(['/login', '/', '/provider', '/channel', '/runtime', '/logs', '/doctor', '/tools', '/review', '/settings', '/chat']);
-const APP_PAGES = new Set(['/', '/provider', '/channel', '/runtime', '/logs', '/doctor', '/tools', '/review', '/settings', '/chat']);
+const PUBLIC_PAGES = new Set(['/login', '/', '/provider', '/9router', '/channel', '/runtime', '/logs', '/doctor', '/tools', '/review', '/settings', '/chat']);
+const APP_PAGES = new Set(['/', '/provider', '/9router', '/channel', '/runtime', '/logs', '/doctor', '/tools', '/review', '/settings', '/chat']);
 
 const OPENAI_OAUTH_MODEL_CATALOG = [
   'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini',

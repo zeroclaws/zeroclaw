@@ -1,8 +1,10 @@
 (() => {
   'use strict';
 
+  const NINE_ROUTER_PATH = '/provider/9router';
+  const LEGACY_NINE_ROUTER_PATH = '/9router';
   const routes = [
-    ['/', 'Overview', 'status'], ['/provider', 'PROVIDER', 'provider'], ['/9router', '9Router', '9r'], ['/chat', 'Chat', 'chat'],
+    ['/', 'Overview', 'status'], ['/provider', 'PROVIDER', 'provider'], [NINE_ROUTER_PATH, '9Router', '9r'], ['/chat', 'Chat', 'chat'],
     ['/channel', 'Telegram', 'tg'], ['/runtime', 'Runtime', 'power'], ['/logs', 'Logs', 'tail'],
     ['/doctor', 'Doctor', 'check'], ['/tools', 'Tools', 'toggle'], ['/review', 'Review', 'warn'],
     ['/settings', 'Settings', 'gear']
@@ -77,7 +79,10 @@
     n.style.borderColor = bad ? 'rgba(255,95,117,.65)' : 'rgba(0,255,157,.45)';
   }
 
-  function go(path) { history.pushState(null, '', path); render(); }
+  function normalizedPath(path) { return path === LEGACY_NINE_ROUTER_PATH ? NINE_ROUTER_PATH : path; }
+  function isNineRouterPath(path = location.pathname) { return normalizedPath(path) === NINE_ROUTER_PATH; }
+  function rememberReturnAndLogin() { sessionStorage.setItem('zeroclaw.login.returnTo', location.pathname); go('/login'); }
+  function go(path) { history.pushState(null, '', normalizedPath(path)); render(); }
   function redactedRef(ref) { return ref ? ref.replace(/^(env:|oauth:|secret:)(.).+$/, '$1$2••••') : 'Belum dipilih'; }
   function isTrustedOAuthMessage(event) {
     if (!event.data || event.data.type !== 'zeroclaw-oauth-connected') return false;
@@ -107,14 +112,16 @@
 
   function setAuth() {
     const authed = Boolean(state.token);
+    const nineRouter = isNineRouterPath();
     $('authState').textContent = authed ? 'Login aktif' : 'Belum login';
     $('authHint').textContent = authed ? 'Bearer token aktif sesi ini.' : 'Masuk untuk akses API lokal.';
     document.querySelector('.dot')?.classList.toggle('on', authed);
-    $('logoutBtn').hidden = !authed;
-    $('refreshBtn').hidden = !authed;
-    $('menuBtn').hidden = !authed;
-    $('sidebar').hidden = !authed;
-    $('shell').classList.toggle('auth-shell', !authed);
+    $('logoutBtn').hidden = !authed || nineRouter;
+    $('refreshBtn').hidden = !authed || nineRouter;
+    $('menuBtn').hidden = !authed || nineRouter;
+    $('sidebar').hidden = !authed || nineRouter;
+    $('shell').classList.toggle('auth-shell', !authed && !nineRouter);
+    $('shell').classList.toggle('nine-router-shell', nineRouter);
     $('shell').classList.toggle('nav-open', false);
     $('menuBtn').setAttribute('aria-expanded', 'false');
   }
@@ -152,7 +159,7 @@
       card('Aksi awal', el('div', { class: 'row' }, [el('button', { class: 'primary', onclick: init, text: 'Init workspace' }), el('a', { class: 'ghost', href: '/provider', text: 'Setup provider' })]), 'span-4')
     ]),
     '/provider': () => providerView(),
-    '/9router': () => nineRouterView(),
+    [NINE_ROUTER_PATH]: () => nineRouterView(),
     '/chat': () => chatView(),
     '/channel': () => channelView(),
     '/runtime': () => el('div', { class: 'grid' }, [card('Runtime controls', el('div', { class: 'row' }, ['start','stop','restart'].map(a => el('button', { class: a === 'stop' ? 'danger ghost' : 'primary', onclick: () => runtime(a), text: title(a) }))), 'span-6'), card('Status API', pre(state.status), 'span-6')]),
@@ -182,6 +189,7 @@
   }
 
   function nineRouterConnectionStatus() {
+    if (!state.token) return { label: 'Dashboard preview mode', tone: 'warn', detail: '9Router opens without the Zeroclaw password. Login is only needed when saving Zeroclaw provider settings.' };
     const provider = state.config?.provider || {};
     const baseUrl = provider.baseUrl || '';
     const credentialRef = provider.credentialRef || '';
@@ -207,6 +215,7 @@
   }
 
   function nineRouterView() {
+    if (location.pathname === LEGACY_NINE_ROUTER_PATH) history.replaceState(null, '', NINE_ROUTER_PATH);
     const counts = nineRouterProviderCounts();
     const totalProviders = Object.values(counts).reduce((sum, value) => sum + value, 0);
     const status = nineRouterConnectionStatus();
@@ -225,7 +234,7 @@
         el('h2', { id: 'nineRouterTitle', text: '9Router' }),
         el('p', { class: 'muted', text: 'A Zeroclaw page shaped after decolua/9router: endpoint setup, provider catalog, CLI tool guides, and skills links in one place.' }),
         el('div', { class: 'nine-hero-actions' }, [
-          el('button', { class: 'primary', type: 'button', onclick: connectNineRouterDefault, text: 'Save local 9Router provider' }),
+          state.token ? el('button', { class: 'primary', type: 'button', onclick: connectNineRouterDefault, text: 'Save local 9Router provider' }) : el('button', { class: 'primary', type: 'button', onclick: rememberReturnAndLogin, text: 'Login to save Zeroclaw provider' }),
           el('button', { class: 'ghost', type: 'button', onclick: () => copyText(NINE_ROUTER_DEFAULT.installCommand, 'Install command'), text: 'Copy install command' }),
           el('a', { class: 'ghost', href: NINE_ROUTER_DEFAULT.repo, target: '_blank', rel: 'noreferrer', text: 'GitHub' })
         ])
@@ -282,22 +291,24 @@
 
   function nineRouterConnectCard(status) {
     const provider = state.config?.provider || {};
+    const isAuthed = Boolean(state.token);
     const form = el('form', { class: 'card stack nine-connect-card span-5', 'aria-labelledby': 'nineConnectTitle' }, [
       el('p', { class: 'provider-kicker', text: 'ZEROCLAW CONNECTION' }),
       el('h3', { id: 'nineConnectTitle', text: 'Connect Zeroclaw to 9Router' }),
-      el('div', { class: `health-badge ${status.tone}` }, [el('span', { text: status.label }), el('small', { text: redactedRef(provider.credentialRef) })]),
+      el('div', { class: `health-badge ${status.tone}` }, [el('span', { text: status.label }), el('small', { text: isAuthed ? redactedRef(provider.credentialRef) : 'Public 9Router page' })]),
       input('9Router base URL', 'nineBaseUrl', /20128\/v1/i.test(provider.baseUrl || '') ? provider.baseUrl : NINE_ROUTER_DEFAULT.endpoint),
       input('Model alias', 'nineModel', provider.model || NINE_ROUTER_DEFAULT.model),
       input('API key credential ref', 'nineCredentialRef', /NINE_ROUTER/i.test(provider.credentialRef || '') ? provider.credentialRef : NINE_ROUTER_DEFAULT.apiKeyRef),
       el('div', { class: 'provider-actions' }, [
-        el('button', { class: 'primary', type: 'submit', text: 'Save 9Router provider' }),
-        el('button', { class: 'ghost', type: 'button', onclick: checkProviderConnection, text: 'Check connection' }),
+        isAuthed ? el('button', { class: 'primary', type: 'submit', text: 'Save 9Router provider' }) : el('button', { class: 'primary', type: 'button', onclick: rememberReturnAndLogin, text: 'Login to save provider' }),
+        el('button', { class: 'ghost', type: 'button', onclick: isAuthed ? checkProviderConnection : rememberReturnAndLogin, text: isAuthed ? 'Check connection' : 'Login to check connection' }),
         el('button', { class: 'ghost', type: 'button', onclick: () => copyText('export NINE_ROUTER_API_KEY="paste-your-9router-key"', 'API key env line'), text: 'Copy API key env line' })
       ]),
-      el('p', { class: 'secret-note', text: 'This saves only a credential reference (env:NINE_ROUTER_API_KEY). API keys stay server-side or in your environment.' })
+      el('p', { class: 'secret-note', text: isAuthed ? 'This saves only a credential reference (env:NINE_ROUTER_API_KEY). API keys stay server-side or in your environment.' : 'You can view the full 9Router dashboard without a password. Saving Zeroclaw config still requires the local dashboard login.' })
     ]);
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (!state.token) { rememberReturnAndLogin(); return; }
       const fd = new FormData(form);
       await save('/api/config/provider', { preset: 'custom', type: 'openai', baseUrl: fd.get('nineBaseUrl'), model: fd.get('nineModel'), credentialRef: fd.get('nineCredentialRef'), requestMode: 'chat-completions' });
     });
@@ -741,7 +752,9 @@
         state.token = res.token || res.accessToken || res.session?.token || '';
         if (!state.token) throw new Error('Token tidak ditemukan di respons login.');
         sessionStorage.setItem(tokenKey, state.token);
-        history.pushState(null, '', '/');
+        const returnTo = normalizedPath(sessionStorage.getItem('zeroclaw.login.returnTo') || '/');
+        sessionStorage.removeItem('zeroclaw.login.returnTo');
+        history.pushState(null, '', views[returnTo] ? returnTo : '/');
         await loadBase();
         render();
         flash('Login berhasil.');
@@ -756,15 +769,19 @@
   }
 
   async function render() {
-    if (location.pathname === '/login' || !state.token) { history.replaceState(null, '', '/login'); setAuth(); renderNav(); return renderLogin(); }
-    if (sessionStorage.getItem('zeroclaw.oauth.returning') === '1' || consumeOAuthReturnMarker()) {
+    if (location.pathname === LEGACY_NINE_ROUTER_PATH) history.replaceState(null, '', NINE_ROUTER_PATH);
+    const path = normalizedPath(location.pathname);
+    const nineRouter = isNineRouterPath(path);
+    if (path === '/login') { setAuth(); renderNav(); return renderLogin(); }
+    if (!state.token && !nineRouter) { history.replaceState(null, '', '/login'); setAuth(); renderNav(); return renderLogin(); }
+    if (state.token && (sessionStorage.getItem('zeroclaw.oauth.returning') === '1' || consumeOAuthReturnMarker())) {
       sessionStorage.removeItem('zeroclaw.oauth.returning');
       try { await loadBase(); state.credentialHealth = await api('/api/provider/credential-health'); await loadProviderModels(true); flash('OpenAI OAuth status refreshed. Models imported.'); } catch (_) {}
     }
-    if (!views[location.pathname]) history.replaceState(null, '', '/');
-    if (location.pathname === '/provider' || location.pathname === '/9router') await loadProviderModels();
-    setAuth(); renderNav(); $('routeEyebrow').textContent = location.pathname; $('pageTitle').textContent = routes.find(r => r[0] === location.pathname)?.[1] || 'Overview';
-    $('view').replaceChildren(views[location.pathname]());
+    if (!views[path]) { history.replaceState(null, '', '/'); return render(); }
+    if (state.token && (path === '/provider' || nineRouter)) await loadProviderModels();
+    setAuth(); renderNav(); $('routeEyebrow').textContent = path; $('pageTitle').textContent = routes.find(r => r[0] === path)?.[1] || 'Overview';
+    $('view').replaceChildren(views[path]());
   }
 
   $('menuBtn').addEventListener('click', () => {

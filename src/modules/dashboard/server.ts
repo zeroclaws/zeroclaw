@@ -20,8 +20,8 @@ import { deleteStoredCredential, resolveOAuthCredential, resolveSecretRef, saveO
 const DEFAULT_PASSWORD = '123456';
 const DEFAULT_OAUTH_CALLBACK_PORT = 1455;
 const scrypt = promisify(scryptCallback);
-const PUBLIC_PAGES = new Set(['/login', '/', '/provider', '/9router', '/channel', '/runtime', '/logs', '/doctor', '/tools', '/review', '/settings', '/chat']);
-const APP_PAGES = new Set(['/', '/provider', '/9router', '/channel', '/runtime', '/logs', '/doctor', '/tools', '/review', '/settings', '/chat']);
+const PUBLIC_PAGES = new Set(['/login', '/provider/9router']);
+const APP_PAGES = new Set(['/', '/provider', '/provider/9router', '/channel', '/runtime', '/logs', '/doctor', '/tools', '/review', '/settings', '/chat']);
 
 const OPENAI_OAUTH_MODEL_CATALOG = [
   'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini',
@@ -642,6 +642,7 @@ export async function createDashboardServer(options: DashboardOptions = {}): Pro
   app.addHook('onClose', async () => { await new Promise<void>((resolveClose) => { if (!oauthCallbackServer?.listening) return resolveClose(); oauthCallbackServer.close(() => resolveClose()); }); });
 
   for (const page of new Set([...PUBLIC_PAGES, ...APP_PAGES])) app.get(page, async (_request, reply) => { if (!await serveAsset(reply, page)) return reply.type('text/html').send('<!doctype html><title>Zeroclaw Control</title><div id="app"></div>'); });
+  app.get('/9router', async (_request, reply) => reply.code(308).header('location', '/provider/9router').send());
   app.get('/*', async (request, reply) => { if (!await serveAsset(reply, new URL(request.url, 'http://localhost').pathname)) return reply.code(404).send({ error: 'not found' }); });
 
   return app;

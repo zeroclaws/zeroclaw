@@ -38,15 +38,24 @@ test('login is public and status requires bearer token', async () => {
   }
 });
 
-test('settings and 9router shell routes are authenticated app pages', async () => {
+test('settings stays authenticated while 9router opens as public full dashboard shell', async () => {
   const app = await createDashboardServer({ password: '123456' });
   try {
     const loginPage = await app.inject({ method: 'GET', url: '/settings' });
     assert.equal(loginPage.statusCode, 200);
     assert.match(loginPage.body, /login/i);
 
+    const publicNineRouter = await app.inject({ method: 'GET', url: '/provider/9router' });
+    assert.equal(publicNineRouter.statusCode, 200);
+    assert.match(publicNineRouter.headers['content-type'] as string, /text\/html/);
+    assert.match(publicNineRouter.body, /<script src="\/app\.js"><\/script>/);
+
+    const legacyNineRouter = await app.inject({ method: 'GET', url: '/9router' });
+    assert.equal(legacyNineRouter.statusCode, 308);
+    assert.equal(legacyNineRouter.headers.location, '/provider/9router');
+
     const token = await login(app);
-    for (const url of ['/settings', '/9router']) {
+    for (const url of ['/settings', '/provider/9router']) {
       const page = await app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${token}` } });
       assert.equal(page.statusCode, 200);
       assert.match(page.headers['content-type'] as string, /text\/html/);

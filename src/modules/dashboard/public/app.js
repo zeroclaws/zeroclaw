@@ -119,18 +119,25 @@
     $('logoutBtn').hidden = !authed || nineRouter;
     $('refreshBtn').hidden = !authed || nineRouter;
     $('menuBtn').hidden = !authed || nineRouter;
-    $('sidebar').hidden = !authed || nineRouter;
+    $('sidebar').hidden = !authed && !nineRouter;
     $('shell').classList.toggle('auth-shell', !authed && !nineRouter);
     $('shell').classList.toggle('nine-router-shell', nineRouter);
-    $('shell').classList.toggle('nav-open', false);
-    $('menuBtn').setAttribute('aria-expanded', 'false');
+    setSidebarOpen(false);
   }
+
+  function setSidebarOpen(open) {
+    $('shell').classList.toggle('nav-open', open);
+    $('menuBtn').setAttribute('aria-expanded', String(open));
+    document.querySelectorAll('.nine-sidebar-toggle').forEach((button) => button.setAttribute('aria-expanded', String(open)));
+  }
+
+  function toggleSidebar() { setSidebarOpen(!$('shell').classList.contains('nav-open')); }
 
   function renderNav() {
     const nav = $('nav'); nav.replaceChildren();
     routes.forEach(([path, label, badge]) => {
       const a = el('a', { href: path, class: location.pathname === path ? 'active' : '', 'aria-current': location.pathname === path ? 'page' : null }, [label, el('small', { text: badge })]);
-      a.addEventListener('click', (e) => { e.preventDefault(); $('shell').classList.remove('nav-open'); $('menuBtn').setAttribute('aria-expanded', 'false'); go(path); });
+      a.addEventListener('click', (e) => { e.preventDefault(); setSidebarOpen(false); go(path); });
       nav.append(a);
     });
   }
@@ -265,7 +272,8 @@
       apikeyEntries.length ? nineRouterProviderGroup('API Key Providers', 'Fixed provider catalog for API-key, media, search, and local providers.', visibleApikeyEntries, 'apikey', hiddenApikeyCount ? el('button', { class: 'ghost nine-show-all', type: 'button', onclick: () => { state.nineRouterShowAllApikey = true; render(); }, text: `Show all ${apikeyEntries.length} API key providers` }) : null) : null
     ].filter(Boolean);
 
-    const children = [hero, endpointCard, connectCard, dashboardMap, searchCard];
+    const sidebarToggle = el('button', { class: 'nine-sidebar-toggle', type: 'button', onclick: toggleSidebar, 'aria-controls': 'sidebar', 'aria-expanded': $('shell').classList.contains('nav-open') ? 'true' : 'false', 'aria-label': 'Open sidebar menu', text: '☰' });
+    const children = [sidebarToggle, hero, endpointCard, connectCard, dashboardMap, searchCard];
     if (!hasAnyResult) children.push(el('section', { class: 'card nine-empty span-12' }, [el('h3', { text: 'No providers match your search' }), el('p', { class: 'muted', text: 'Try searching provider names, aliases, or service kinds like llm, tts, image, webSearch.' })]));
     children.push(...providerGroups, nineRouterCliTools(), nineRouterSkills());
     if (state.modelModalOpen) children.push(modelPickerModal());
@@ -784,11 +792,7 @@
     $('view').replaceChildren(views[path]());
   }
 
-  $('menuBtn').addEventListener('click', () => {
-    const open = !$('shell').classList.contains('nav-open');
-    $('shell').classList.toggle('nav-open', open);
-    $('menuBtn').setAttribute('aria-expanded', String(open));
-  });
+  $('menuBtn').addEventListener('click', toggleSidebar);
   $('logoutBtn').addEventListener('click', () => { sessionStorage.removeItem(tokenKey); state.token = ''; history.pushState(null, '', '/login'); render(); });
   $('refreshBtn').addEventListener('click', async () => { await loadBase(); render(); flash('Data diperbarui.'); });
   addEventListener('message', async (event) => {

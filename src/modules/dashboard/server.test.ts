@@ -280,7 +280,9 @@ test('chat settings save system prompt and chat endpoint forwards it', async () 
     const chat = await app.inject({ method: 'POST', url: '/api/chat', headers: auth, payload: { messages: [{ role: 'user', content: 'hi' }] } });
     assert.equal(chat.statusCode, 200);
     const providerPayload = JSON.parse(requestBody) as { messages: Array<{ role: string, content: string }> };
-    assert.deepEqual(providerPayload.messages[0], { role: 'system', content: 'Be concise.' });
+    assert.equal(providerPayload.messages[0].role, 'system');
+    assert.match(providerPayload.messages[0].content, /You are the Zeroclaw local AI agent runtime/);
+    assert.match(providerPayload.messages[0].content, /<dashboard_chat_system_prompt>\nBe concise\.\n<\/dashboard_chat_system_prompt>/);
   } finally {
     await app.close();
     globalThis.fetch = oldFetch;
@@ -349,8 +351,10 @@ test('chat server owns system prompt, strips user system role, and enforces hist
     const chat = await app.inject({ method: 'POST', url: '/api/chat', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, payload });
     assert.equal(chat.statusCode, 200);
     const providerPayload = JSON.parse(requestBody) as { messages: Array<{ role: string; content: string }> };
-    assert.deepEqual(providerPayload.messages, [
-      { role: 'system', content: 'Follow Zeroclaw guidance only.' },
+    assert.equal(providerPayload.messages[0].role, 'system');
+    assert.match(providerPayload.messages[0].content, /You are the Zeroclaw local AI agent runtime/);
+    assert.match(providerPayload.messages[0].content, /<dashboard_chat_system_prompt>\nFollow Zeroclaw guidance only\.\n<\/dashboard_chat_system_prompt>/);
+    assert.deepEqual(providerPayload.messages.slice(1), [
       { role: 'user', content: 'kept user' },
       { role: 'assistant', content: 'kept assistant' },
       { role: 'user', content: 'latest user' }
@@ -385,5 +389,141 @@ test('chat disabled setting returns friendly disabled response without provider 
     await app.close();
     globalThis.fetch = oldFetch;
     delete process.env.ZEROCLAW_TEST_KEY;
+  }
+});
+
+
+test('provider default and fallback model APIs validate dedupe and remove primary duplicate', async () => {
+  const config = defaultConfig();
+  config.provider.model = 'primary';
+  config.provider.fallbackModels = ['old'];
+  const app = await createDashboardServer({ password: '123456', config });
+  try {
+    const token = await login(app);
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const fallback = await app.inject({ method: 'POST', url: '/api/provider/fallback-models', headers: auth, payload: { models: ['fallback-a', 'primary', 'fallback-a', 'fallback-b', '  '] } });
+    assert.equal(fallback.statusCode, 200);
+    assert.deepEqual((fallback.json() as { fallbackModels: string[] }).fallbackModels, ['fallback-a', 'fallback-b']);
+
+    const primary = await app.inject({ method: 'POST', url: '/api/provider/default-model', headers: auth, payload: { model: 'fallback-a' } });
+    assert.equal(primary.statusCode, 200);
+    assert.equal((primary.json() as { model: string }).model, 'fallback-a');
+    assert.deepEqual((primary.json() as { fallbackModels: string[] }).fallbackModels, ['fallback-b']);
+
+    const invalid = await app.inject({ method: 'POST', url: '/api/provider/fallback-models', headers: auth, payload: { models: Array.from({ length: 9 }, (_, i) => `m-${i}`) } });
+    assert.equal(invalid.statusCode, 400);
+  } finally {
+    await app.close();
+  }
+});
+
+test('provider config accepts requestMode and fallbackModels patch', async () => {
+  const config = defaultConfig();
+  const app = await createDashboardServer({ password: '123456', config });
+  try {
+    const token = await login(app);
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const response = await app.inject({ method: 'POST', url: '/api/config/provider', headers: auth, payload: { requestMode: 'responses', fallbackModels: ['gpt-b', 'gpt-b', config.provider.model] } });
+    assert.equal(response.statusCode, 200);
+    const body = response.json() as { provider: { requestMode: string; fallbackModels: string[] } };
+    assert.equal(body.provider.requestMode, 'responses');
+    assert.deepEqual(body.provider.fallbackModels, ['gpt-b']);
+  } finally {
+    await app.close();
+  }
+});
+
+test('chat responses mode stores conversation and writes safe attempts audit log', async () => {
+  const oldHome = process.env.ZEROCLAW_HOME;
+  const oldFetch = globalThis.fetch;
+  process.env.ZEROCLAW_HOME = await mkdtemp(join(tmpdir(), 'zeroclaw-session-'));
+  process.env.ZEROCLAW_TEST_KEY = 'session-secret-token';
+  const config = defaultConfig();
+  config.provider.credentialRef = 'env:ZEROCLAW_TEST_KEY';
+  config.provider.requestMode = 'responses';
+  config.provider.model = 'bad-model';
+  config.provider.fallbackModels = ['good-model'];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.model === 'bad-model') return new Response('{"error":"model failed session-secret-token"}', { status: 500 });
+    return new Response(JSON.stringify({ output_text: 'jawaban dari responses', usage: { input_tokens: 5, output_tokens: 6, total_tokens: 11 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const app = await createDashboardServer({ password: '123456', config });
+  try {
+    const token = await login(app);
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const chat = await app.inject({ method: 'POST', url: '/api/chat', headers: auth, payload: { sessionId: 's-api', message: 'halo' } });
+    assert.equal(chat.statusCode, 200);
+    const chatBody = chat.json() as { ok: boolean; reply: string; usage: { totalTokens: number }; requestMode: string; attempts: Array<{ model: string; status: string }> };
+    assert.equal(chatBody.ok, true);
+    assert.equal(chatBody.reply, 'jawaban dari responses');
+    assert.equal(chatBody.usage.totalTokens, 11);
+    assert.equal(chatBody.requestMode, 'responses');
+    assert.equal(chatBody.attempts[0].status, 'failed');
+    assert.equal(chat.body.includes('session-secret-token'), false);
+
+    const session = await app.inject({ method: 'GET', url: '/api/sessions/s-api', headers: { authorization: `Bearer ${token}` } });
+    assert.equal(session.statusCode, 200);
+    const messages = (session.json() as { messages: Array<{ role: string; content: string }> }).messages;
+    assert.equal(messages.length, 2);
+    assert.deepEqual(messages.map((message) => message.role), ['user', 'assistant']);
+
+    const logs = await app.inject({ method: 'GET', url: '/api/runtime/logs', headers: { authorization: `Bearer ${token}` } });
+    assert.equal(logs.statusCode, 200);
+    const attemptsLog = await import('node:fs/promises').then((fs) => fs.readFile(join(process.env.ZEROCLAW_HOME!, 'logs', 'llm-attempts.jsonl'), 'utf8'));
+    assert.match(attemptsLog, /bad-model/);
+    assert.equal(attemptsLog.includes('session-secret-token'), false);
+  } finally {
+    await app.close();
+    globalThis.fetch = oldFetch;
+    delete process.env.ZEROCLAW_TEST_KEY;
+    if (oldHome === undefined) delete process.env.ZEROCLAW_HOME; else process.env.ZEROCLAW_HOME = oldHome;
+  }
+});
+
+test('agent context, memory, tools, and runtime APIs are protected and functional skeletons', async () => {
+  const oldHome = process.env.ZEROCLAW_HOME;
+  process.env.ZEROCLAW_HOME = await mkdtemp(join(tmpdir(), 'zeroclaw-apis-'));
+  const { ensureWorkspace } = await import('../storage/workspace.js');
+  await ensureWorkspace();
+  const app = await createDashboardServer({ password: '123456', config: defaultConfig() });
+  try {
+    const blocked = await app.inject({ method: 'GET', url: '/api/memory' });
+    assert.equal(blocked.statusCode, 401);
+    const token = await login(app);
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    const context = await app.inject({ method: 'GET', url: '/api/agent/context', headers: { authorization: `Bearer ${token}` } });
+    assert.equal(context.statusCode, 200);
+    assert.equal(context.body.includes('MEMORY.md'), false);
+    assert.match(context.body, /AGENTS\.md/);
+
+    const prompt = await app.inject({ method: 'GET', url: '/api/agent/prompt-preview', headers: { authorization: `Bearer ${token}` } });
+    assert.equal(prompt.statusCode, 200);
+    assert.match(prompt.body, /Zeroclaw local AI agent runtime/);
+    assert.equal(prompt.body.includes('API_KEY='), false);
+
+    const appended = await app.inject({ method: 'POST', url: '/api/memory/append', headers: auth, payload: { content: 'catatan test', daily: true } });
+    assert.equal(appended.statusCode, 200);
+    const memory = await app.inject({ method: 'GET', url: '/api/memory?file=memory/test.md', headers: { authorization: `Bearer ${token}` } });
+    assert.equal(memory.statusCode, 200);
+
+    const tools = await app.inject({ method: 'GET', url: '/api/tools/schemas', headers: { authorization: `Bearer ${token}` } });
+    assert.equal(tools.statusCode, 200);
+    assert.match(tools.body, /memory.append/);
+    const parsed = await app.inject({ method: 'POST', url: '/api/tools/parse', headers: auth, payload: { providerPayload: { choices: [{ message: { tool_calls: [{ id: 'call-1', function: { name: 'memory.append', arguments: '{"content":"x"}' } }] } }] } } });
+    assert.equal(parsed.statusCode, 200);
+    assert.equal((parsed.json() as { toolCalls: Array<{ name: string }> }).toolCalls[0].name, 'memory.append');
+
+    const started = await app.inject({ method: 'POST', url: '/api/runtime/start', headers: auth, payload: {} });
+    assert.equal(started.statusCode, 200);
+    assert.equal((started.json() as { status: string }).status, 'running');
+    const status = await app.inject({ method: 'GET', url: '/api/runtime/status', headers: { authorization: `Bearer ${token}` } });
+    assert.equal((status.json() as { running: boolean }).running, true);
+    const stopped = await app.inject({ method: 'POST', url: '/api/runtime/stop', headers: auth, payload: {} });
+    assert.equal((stopped.json() as { status: string }).status, 'stopped');
+  } finally {
+    await app.close();
+    if (oldHome === undefined) delete process.env.ZEROCLAW_HOME; else process.env.ZEROCLAW_HOME = oldHome;
   }
 });

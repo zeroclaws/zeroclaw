@@ -21,6 +21,8 @@ export const ConfigSchema = z.object({
     type: z.string().default('openai-oauth-compatible'),
     baseUrl: baseUrlSchema.default('https://api.openai.com/v1'),
     model: z.string().default('gpt-4o-mini'),
+    fallbackModels: z.array(z.string().min(1)).max(8).default([]),
+    requestMode: z.enum(['auto', 'chat-completions', 'responses', 'openai-oauth']).default('auto'),
     credentialRef: credentialRefSchema.default('oauth:openai')
   }).strict().prefault({}),
   telegram: z.object({

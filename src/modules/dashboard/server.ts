@@ -1,6 +1,6 @@
 import { createReadStream, existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { readdir, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -9,6 +9,12 @@ import { z } from 'zod';
 import { DEFAULT_SETUP_PORT, ZEROCLAW_SPEC_VERSION } from '../../shared/constants.js';
 import { configPath, dataDir, envPath } from '../../shared/paths.js';
 import { defaultConfig, loadConfig, saveConfig, type ZeroclawConfig } from '../storage/config.js';
+import { buildAgentSystemPrompt, loadAgentContext, loadAgentSystemPrompt } from '../agent/context.js';
+import { modelFallbackChain, normalizeProviderResponse, runChatCompletionsWithFallbacks, type ChatMessage } from '../llm/request.js';
+import { appendConversationMessage, exportConversation, listConversationSessions, normalizeSessionId, readConversation } from '../storage/conversations.js';
+import { appendMemory, listMemoryFiles, readMemory } from '../storage/memory.js';
+import { restartRuntime, runtimeLogs, runtimeStatus, startRuntime, stopRuntime } from '../runtime/daemon.js';
+import { executeToolCall, listToolSchemas, parseToolCalls } from '../agent/tools.js';
 import { deleteStoredCredential, resolveOAuthCredential, resolveSecretRef, saveOAuthCredential, isOAuthCredentialExpired } from '../storage/secrets.js';
 
 const DEFAULT_PASSWORD = '123456';
@@ -24,11 +30,11 @@ const OPENAI_OAUTH_MODEL_CATALOG = [
   'gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o3', 'o3-mini', 'o4-mini'
 ];
 
-function configuredModels(fallbackModel?: string): string[] { return Array.from(new Set([...(fallbackModel ? [fallbackModel] : []), 'gpt-4o-mini'])); }
+function configuredModels(...models: Array<string | undefined>): string[] { return Array.from(new Set([...models.filter((model): model is string => Boolean(model?.trim())).map((model) => model.trim()), 'gpt-4o-mini'])); }
 
-function oauthCatalogModels(credential: { chatgptPlanType?: string } | undefined, fallbackModel?: string): string[] {
-  if (!credential) return configuredModels(fallbackModel);
-  return Array.from(new Set([...OPENAI_OAUTH_MODEL_CATALOG, ...configuredModels(fallbackModel)]));
+function oauthCatalogModels(credential: { chatgptPlanType?: string } | undefined, models: string[] = []): string[] {
+  if (!credential) return configuredModels(...models);
+  return Array.from(new Set([...OPENAI_OAUTH_MODEL_CATALOG, ...configuredModels(...models)]));
 }
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8', '.png': 'image/png' };
@@ -38,13 +44,18 @@ type DashboardOptions = { password?: string; config?: ZeroclawConfig; dashboardP
 const LoginSchema = z.object({ password: z.string() }).strict();
 const PasswordChangeSchema = z.object({ oldPassword: z.string().min(1), newPassword: z.string().min(8).max(1024) }).strict();
 const ChatSettingsSchema = z.object({ enabled: z.boolean(), systemPrompt: z.string().max(8000).default(''), historyLimit: z.number().int().min(1).max(100) }).strict();
+const RequestModeSchema = z.enum(['auto', 'chat-completions', 'responses', 'openai-oauth']);
 const ProviderSchema = z.object({
   preset: z.string().min(1).optional(),
   type: z.string().min(1).optional(),
   baseUrl: z.string().url().optional(),
   model: z.string().min(1).optional(),
+  fallbackModels: z.array(z.string().min(1)).max(8).optional(),
+  requestMode: RequestModeSchema.optional(),
   credentialRef: z.string().regex(/^(env:[A-Z_][A-Z0-9_]*|oauth:[A-Za-z0-9._-]+)$/).optional()
 }).strict();
+const DefaultModelSchema = z.object({ model: z.string().min(1) }).strict();
+const FallbackModelsSchema = z.object({ models: z.array(z.string().min(1)).max(8) }).strict();
 const ChannelSchema = z.object({ enabled: z.boolean().optional(), botTokenRef: z.string().regex(/^(env:[A-Z_][A-Z0-9_]*|oauth:[A-Za-z0-9._-]+)$/).optional() }).strict();
 const ToolsSchema = z.object({ webFetch: z.boolean().optional(), webSearch: z.boolean().optional(), workspaceFiles: z.boolean().optional(), reminders: z.boolean().optional(), shell: z.boolean().optional() }).strict();
 const EmptySchema = z.object({}).strict();
@@ -52,7 +63,10 @@ const OAuthUrlSchema = z.object({ provider: z.string().regex(/^[A-Za-z0-9._-]+$/
 const OAuthExchangeSchema = z.object({ provider: z.string().regex(/^[A-Za-z0-9._-]+$/).default('openai'), code: z.string().min(1), state: z.string().min(16), redirectUri: z.string().url().optional() }).strict();
 const CredentialClearSchema = z.object({ ref: z.string().regex(/^(secret:[A-Za-z_][A-Za-z0-9_]*|oauth:[A-Za-z0-9._-]+)$/).optional() }).strict();
 const ChatMessageSchema = z.object({ role: z.string(), content: z.string().max(20000) }).passthrough();
-const ChatSchema = z.object({ message: z.string().max(20000).optional(), messages: z.array(ChatMessageSchema).default([]) }).strict();
+const ChatSchema = z.object({ message: z.string().max(20000).optional(), messages: z.array(ChatMessageSchema).default([]), sessionId: z.string().max(120).optional() }).strict();
+const MemoryAppendSchema = z.object({ content: z.string().min(1).max(20000), file: z.string().max(200).optional(), daily: z.boolean().optional() }).strict();
+const ToolParseSchema = z.object({ providerPayload: z.unknown() }).strict();
+const ToolExecuteSchema = z.object({ call: z.object({ id: z.string().min(1), name: z.string().min(1), arguments: z.record(z.string(), z.unknown()).default({}) }).strict() }).strict();
 
 
 function decodeJwtPayload(token?: string): Record<string, unknown> | undefined {
@@ -135,8 +149,26 @@ async function parseJson<T>(request: FastifyRequest, schema: z.ZodType<T>): Prom
   return schema.parse(request.body ?? {});
 }
 
-function runtimePlaceholder(action?: string) {
-  return { status: 'placeholder', runtimeImplemented: false, message: `Runtime daemon is not implemented yet${action ? `; ${action} was not performed` : ''}.` };
+function cleanModelList(models: string[], primary?: string): string[] {
+  const seen = new Set<string>();
+  const cleaned: string[] = [];
+  const primaryTrimmed = primary?.trim();
+  for (const model of models) {
+    const trimmed = model.trim();
+    if (!trimmed || trimmed === primaryTrimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    cleaned.push(trimmed);
+    if (cleaned.length >= 8) break;
+  }
+  return cleaned;
+}
+
+function safeAttempts(attempts: Array<{ index: number; model: string; requestMode?: string; status: string; statusCode?: number; durationMs?: number; fallbackReason?: string }>) {
+  return attempts.map(({ index, model, requestMode, status, statusCode, durationMs, fallbackReason }) => ({ index, model, requestMode, status, statusCode, durationMs, fallbackReason }));
+}
+
+function todayMemoryFile(): string {
+  return `${new Date().toISOString().slice(0, 10)}.md`;
 }
 
 function dashboardReturnUrl(request: FastifyRequest, port: number): string {
@@ -180,7 +212,7 @@ function safeModelImportCredentialError(models: string[], message = 'Provider cr
   };
 }
 
-function defaultAgentSystemPrompt(): string {
+export function defaultAgentSystemPrompt(): string {
   return [
     'You are Zeroclaw, a helpful local AI agent assistant.',
     'Be concise, practical, and truthful. Ask for clarification only when needed.',
@@ -189,32 +221,19 @@ function defaultAgentSystemPrompt(): string {
   ].join('\n');
 }
 
-function normalizeChatMessages(body: z.infer<typeof ChatSchema>, config: ZeroclawConfig): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
+async function normalizeChatMessages(body: z.infer<typeof ChatSchema>, config: ZeroclawConfig, storedHistory: Array<{ role: string; content: string }> = []): Promise<ChatMessage[]> {
   const allowedHistory = new Set(['user', 'assistant']);
-  const history = body.messages
+  const requestHistory = body.messages
     .filter((message) => allowedHistory.has(message.role) && message.content.trim())
-    .slice(-config.chat.historyLimit)
+    .map((message) => ({ role: message.role as 'user' | 'assistant', content: message.content.trim() }));
+  const persistedHistory = storedHistory
+    .filter((message) => allowedHistory.has(message.role) && message.content.trim())
     .map((message) => ({ role: message.role as 'user' | 'assistant', content: message.content.trim() }));
   const direct = body.message?.trim();
-  if (direct) history.push({ role: 'user', content: direct });
-  const system = config.chat.systemPrompt.trim() || defaultAgentSystemPrompt();
-  return [{ role: 'system', content: system }, ...history];
-}
-
-function extractChatReply(providerPayload: unknown): string {
-  const payload = providerPayload as { choices?: Array<{ message?: { content?: unknown }, delta?: { content?: unknown }, text?: unknown }>, output_text?: unknown, response?: unknown, message?: unknown };
-  const choice = Array.isArray(payload.choices) ? payload.choices[0] : undefined;
-  const content = choice?.message?.content ?? choice?.delta?.content ?? choice?.text ?? payload.output_text ?? payload.response ?? payload.message;
-  if (typeof content === 'string' && content.trim()) return content.trim();
-  return 'Provider returned a response, but no assistant text was found.';
-}
-
-function normalizeUsage(providerPayload: unknown) {
-  const usage = (providerPayload as { usage?: Record<string, unknown> })?.usage ?? {};
-  const inputTokens = Number(usage.prompt_tokens ?? usage.input_tokens ?? usage.inputTokens ?? 0) || 0;
-  const outputTokens = Number(usage.completion_tokens ?? usage.output_tokens ?? usage.outputTokens ?? 0) || 0;
-  const totalTokens = Number(usage.total_tokens ?? usage.totalTokens ?? inputTokens + outputTokens) || inputTokens + outputTokens;
-  return { inputTokens, outputTokens, totalTokens };
+  const combined = [...persistedHistory, ...requestHistory].slice(-config.chat.historyLimit);
+  if (direct) combined.push({ role: 'user', content: direct });
+  const system = await loadAgentSystemPrompt(config.agent.defaultAgent, config.chat.systemPrompt.trim() || defaultAgentSystemPrompt(), { includePrivateMemory: false });
+  return [{ role: 'system', content: system }, ...combined];
 }
 
 function escapeHtmlAttribute(value: string): string {
@@ -321,7 +340,8 @@ async function doctorDto() {
 }
 
 async function listLogs() {
-  return { status: 'placeholder', logPath: join(dataDir(), 'logs', 'zeroclaw.log'), lines: [] as string[], message: 'Runtime logging is not implemented yet.' };
+  const logs = await runtimeLogs(200);
+  return { status: 'ok', ...logs };
 }
 
 function assetRoots(): string[] {
@@ -382,7 +402,7 @@ export async function createDashboardServer(options: DashboardOptions = {}): Pro
     return { token: sessionToken, defaultPasswordWarning: !config.dashboard.passwordHash && password === DEFAULT_PASSWORD };
   });
 
-  app.get('/api/status', async () => ({ specVersion: ZEROCLAW_SPEC_VERSION, dashboard: 'running', runtime: runtimePlaceholder(), configPath: configPath() }));
+  app.get('/api/status', async () => ({ specVersion: ZEROCLAW_SPEC_VERSION, dashboard: 'running', runtime: await runtimeStatus(), configPath: configPath() }));
   app.get('/api/config', async () => sanitizeConfig(config));
   app.get('/api/settings', async () => safeSettings(config));
   app.post('/api/settings/password', async (request, reply) => {
@@ -404,6 +424,9 @@ export async function createDashboardServer(options: DashboardOptions = {}): Pro
     const patch = await parseJson(request, ProviderSchema);
     validateBaseUrl(patch.baseUrl);
     const nextProvider = { ...config.provider, ...patch };
+    if (patch.model !== undefined) nextProvider.model = patch.model.trim();
+    if (patch.fallbackModels !== undefined) nextProvider.fallbackModels = cleanModelList(patch.fallbackModels, nextProvider.model);
+    else if (patch.model !== undefined) nextProvider.fallbackModels = cleanModelList(nextProvider.fallbackModels ?? [], nextProvider.model);
     if (nextProvider.preset === 'kr') nextProvider.credentialRef = nextProvider.credentialRef?.startsWith('env:') || nextProvider.credentialRef?.startsWith('oauth:') ? nextProvider.credentialRef : 'env:ZEROCLAW_KR_API_KEY';
     config = { ...config, provider: nextProvider };
     await saveConfig(config);
@@ -498,7 +521,7 @@ export async function createDashboardServer(options: DashboardOptions = {}): Pro
     return { ok: true, status: 'missing', message: 'Provider credential cleared. Reconnect to continue.' };
   });
   app.get('/api/provider/models', async () => {
-    const fallbackModels = configuredModels(config.provider.model);
+    const fallbackModels = Array.from(new Set([...modelFallbackChain(config), 'gpt-4o-mini']));
     try {
       const ref = config.provider.credentialRef;
       let accessToken: string | undefined;
@@ -515,7 +538,7 @@ export async function createDashboardServer(options: DashboardOptions = {}): Pro
       const text = await response.text();
       if (!response.ok) {
         if (isProviderCredentialFailure(response.status, text)) return safeModelImportCredentialError(fallbackModels);
-        if (ref?.startsWith('oauth:')) return { ok: true, models: oauthCatalogModels(oauthCredential, config.provider.model), source: 'oauth-catalog', account: { email: oauthCredential?.email, plan: oauthCredential?.chatgptPlanType }, message: 'OpenAI OAuth is connected, but /v1/models is unavailable. Showing the OpenAI OAuth model catalog.' };
+        if (ref?.startsWith('oauth:')) return { ok: true, models: oauthCatalogModels(oauthCredential, modelFallbackChain(config)), source: 'oauth-catalog', account: { email: oauthCredential?.email, plan: oauthCredential?.chatgptPlanType }, message: 'OpenAI OAuth is connected, but /v1/models is unavailable. Showing the OpenAI OAuth model catalog.' };
         return { ok: true, models: fallbackModels, source: 'configured', message: 'Could not import provider models; showing configured model only.' };
       }
       const payload = JSON.parse(text);
@@ -527,18 +550,33 @@ export async function createDashboardServer(options: DashboardOptions = {}): Pro
       if (ref?.startsWith('oauth:')) {
         const oauthCredential = await resolveOAuthCredential(ref);
         if (!oauthCredential?.accessToken || isOAuthCredentialExpired(oauthCredential)) return safeModelImportCredentialError(fallbackModels, 'Provider credentials need to be reconnected.');
-        return { ok: true, models: oauthCatalogModels(oauthCredential, config.provider.model), source: 'oauth-catalog', account: { email: oauthCredential?.email, plan: oauthCredential?.chatgptPlanType }, message: 'Model import failed safely; showing OpenAI OAuth model catalog.' };
+        return { ok: true, models: oauthCatalogModels(oauthCredential, modelFallbackChain(config)), source: 'oauth-catalog', account: { email: oauthCredential?.email, plan: oauthCredential?.chatgptPlanType }, message: 'Model import failed safely; showing OpenAI OAuth model catalog.' };
       }
       return { ok: true, models: fallbackModels, source: 'configured', message: 'Model import failed safely; showing configured model only.' };
     }
   });
-  app.post('/api/provider/default-model', async (request) => { const body = await parseJson(request, z.object({ model: z.string().min(1) }).strict()); config = { ...config, provider: { ...config.provider, model: body.model } }; await saveConfig(config); return { ok: true, model: config.provider.model }; });
+  app.post('/api/provider/default-model', async (request) => {
+    const body = await parseJson(request, DefaultModelSchema);
+    const model = body.model.trim();
+    config = { ...config, provider: { ...config.provider, model, fallbackModels: cleanModelList(config.provider.fallbackModels ?? [], model) } };
+    await saveConfig(config);
+    return { ok: true, model: config.provider.model, fallbackModels: config.provider.fallbackModels };
+  });
+  app.post('/api/provider/fallback-models', async (request) => {
+    const body = await parseJson(request, FallbackModelsSchema);
+    const fallbackModels = cleanModelList(body.models, config.provider.model);
+    config = { ...config, provider: { ...config.provider, fallbackModels } };
+    await saveConfig(config);
+    return { ok: true, model: config.provider.model, fallbackModels };
+  });
   app.post('/api/chat', async (request) => {
     const body = await parseJson(request, ChatSchema);
     if (!config.chat.enabled) return { ok: false, mode: 'chat-disabled', reply: 'Chat is disabled in settings.', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
     const ref = config.provider.credentialRef;
     if (!ref) return safeCredentialError('Provider credentials need to be connected.');
-    const messages = normalizeChatMessages(body, config);
+    const sessionId = normalizeSessionId(body.sessionId ?? (typeof request.headers['x-zeroclaw-session'] === 'string' ? request.headers['x-zeroclaw-session'] : 'dashboard'));
+    const storedHistory = body.messages.length ? [] : await readConversation(sessionId, config.chat.historyLimit);
+    const messages = await normalizeChatMessages(body, config, storedHistory);
     const hasUserMessage = messages.some((message) => message.role === 'user');
     if (!hasUserMessage) return { ok: false, mode: 'invalid-request', reply: 'Send a message before starting chat.', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
     let accessToken: string | undefined;
@@ -554,14 +592,52 @@ export async function createDashboardServer(options: DashboardOptions = {}): Pro
       if (!accessToken) return safeCredentialError('Provider environment credential is missing.');
     }
     if (!accessToken) return safeCredentialError('Provider credentials need to be connected.');
-    const response = await fetch(`${config.provider.baseUrl.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: config.provider.model, messages }) });
-    const text = await response.text();
-    if (!response.ok && isProviderCredentialFailure(response.status, text)) return safeCredentialError();
-    if (!response.ok) return { ok: false, mode: 'provider-error', reply: 'Provider request failed. Check the selected model and provider connection.', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, error: { code: 'provider_error', message: 'Provider request failed.' } };
-    const provider = JSON.parse(text);
-    return { ok: true, mode: 'chat', reply: extractChatReply(provider), usage: normalizeUsage(provider), model: config.provider.model, provider };
+    const latestUser = body.message?.trim() || [...body.messages].reverse().find((message) => message.role === 'user' && message.content.trim())?.content.trim();
+    if (latestUser) await appendConversationMessage(sessionId, { role: 'user', content: latestUser }).catch(() => undefined);
+    const llm = await runChatCompletionsWithFallbacks({ config, messages, accessToken, sessionId });
+    if (!llm.ok && llm.attempts.some((attempt) => attempt.status === 'credential-error')) return { ...safeCredentialError(), sessionId, attempts: safeAttempts(llm.attempts) };
+    if (!llm.ok) return { ok: false, mode: 'provider-error', sessionId, reply: 'Provider request failed across the configured model fallback chain. Check the selected model and provider connection.', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, model: llm.model, attempts: safeAttempts(llm.attempts), error: { code: 'provider_error', message: 'Provider request failed.' } };
+    const provider = llm.provider;
+    const normalized = llm.normalized ?? normalizeProviderResponse(provider);
+    const toolCalls = parseToolCalls(provider);
+    await appendConversationMessage(sessionId, { role: 'assistant', content: normalized.reply, model: llm.model, usage: normalized.usage, metadata: { requestMode: llm.requestMode, attempts: safeAttempts(llm.attempts), toolCalls } }).catch(() => undefined);
+    return { ok: true, mode: 'chat', sessionId, reply: normalized.reply, usage: normalized.usage, model: llm.model, requestMode: llm.requestMode, attempts: safeAttempts(llm.attempts), toolCalls };
   });
-  for (const action of ['start', 'stop', 'restart'] as const) app.post(`/api/runtime/${action}`, async (request) => { await parseJson(request, EmptySchema); return runtimePlaceholder(action); });
+
+  app.get('/api/sessions', async () => ({ ok: true, sessions: await listConversationSessions() }));
+  app.get('/api/sessions/:sessionId', async (request) => ({ ok: true, sessionId: normalizeSessionId((request.params as { sessionId: string }).sessionId), messages: await readConversation((request.params as { sessionId: string }).sessionId, 500) }));
+  app.get('/api/sessions/:sessionId/export', async (request) => ({ ok: true, ...(await exportConversation((request.params as { sessionId: string }).sessionId)) }));
+  app.get('/api/sessions/:sessionId/replay', async (request) => ({ ok: true, sessionId: normalizeSessionId((request.params as { sessionId: string }).sessionId), replay: await readConversation((request.params as { sessionId: string }).sessionId, 500) }));
+
+  app.get('/api/agent/context', async () => {
+    const files = await loadAgentContext(config.agent.defaultAgent, { includePrivateMemory: false, maxCharsPerFile: 4000 });
+    return { ok: true, agentId: config.agent.defaultAgent, files: files.map(({ name, path, content, truncated, bytes }) => ({ name, path, content, truncated, bytes })) };
+  });
+  app.get('/api/agent/prompt-preview', async () => {
+    const files = await loadAgentContext(config.agent.defaultAgent, { includePrivateMemory: false, maxCharsPerFile: 4000 });
+    return { ok: true, agentId: config.agent.defaultAgent, prompt: buildAgentSystemPrompt(files, config.chat.systemPrompt.trim() || defaultAgentSystemPrompt()) };
+  });
+
+  app.get('/api/tools/schemas', async () => ({ ok: true, tools: listToolSchemas(config), maxToolIterations: 4 }));
+  app.post('/api/tools/parse', async (request) => { const body = await parseJson(request, ToolParseSchema); return { ok: true, toolCalls: parseToolCalls(body.providerPayload) }; });
+  app.post('/api/tools/execute', async (request) => { const body = await parseJson(request, ToolExecuteSchema); return { ok: true, result: await executeToolCall(config, body.call) }; });
+
+  app.get('/api/memory', async (request) => {
+    const file = new URL(request.url, 'http://localhost').searchParams.get('file') ?? 'MEMORY.md';
+    return { ok: true, files: await listMemoryFiles(), memory: await readMemory(file) };
+  });
+  app.post('/api/memory/append', async (request) => {
+    const body = await parseJson(request, MemoryAppendSchema);
+    const file = body.daily ? todayMemoryFile() : body.file ?? 'MEMORY.md';
+    return await appendMemory(body.content, file);
+  });
+
+  app.get('/api/runtime/status', runtimeStatus);
+  app.get('/api/runtime/health', runtimeStatus);
+  app.get('/api/runtime/logs', async () => runtimeLogs(200));
+  app.post('/api/runtime/start', async (request) => { await parseJson(request, EmptySchema); return startRuntime(); });
+  app.post('/api/runtime/stop', async (request) => { await parseJson(request, EmptySchema); return stopRuntime(); });
+  app.post('/api/runtime/restart', async (request) => { await parseJson(request, EmptySchema); return restartRuntime(); });
 
   app.addHook('onClose', async () => { await new Promise<void>((resolveClose) => { if (!oauthCallbackServer?.listening) return resolveClose(); oauthCallbackServer.close(() => resolveClose()); }); });
 

@@ -5,6 +5,8 @@ import { ensureWorkspace } from '../storage/workspace.js';
 import { runDoctor } from '../system/doctor.js';
 import { startSetupDashboard } from '../dashboard/server.js';
 import { loadConfig } from '../storage/config.js';
+import { loadAgentContext, loadAgentSystemPrompt, parseIdentity } from '../agent/context.js';
+import { runtimeLogs, runtimeStatus, startRuntime, stopRuntime, restartRuntime } from '../runtime/daemon.js';
 
 const program = new Command();
 
@@ -29,27 +31,47 @@ program.command('setup').description('Start temporary setup dashboard').action(a
   await startSetupDashboard(config.dashboard.setupPort);
 });
 
-program.command('start').description('Start Zeroclaw runtime placeholder').action(async () => {
+program.command('start').description('Start Zeroclaw runtime daemon').action(async () => {
   await ensureWorkspace();
   const config = await loadConfig();
-  console.log(`Zeroclaw runtime placeholder: provider=${config.provider.preset}, model=${config.provider.model}`);
+  console.log(JSON.stringify({ ...(await startRuntime()), provider: config.provider.preset, model: config.provider.model }, null, 2));
 });
 
 program.command('status').description('Show Zeroclaw status').action(async () => {
   await ensureWorkspace();
   const config = await loadConfig();
-  console.log(`Spec: ${ZEROCLAW_SPEC_VERSION}`);
-  console.log(`Provider: ${config.provider.preset}`);
-  console.log(`Model: ${config.provider.model}`);
-  console.log(`Telegram: ${config.telegram.enabled ? 'enabled' : 'disabled'} (${config.telegram.groupMode})`);
+  console.log(JSON.stringify({ specVersion: ZEROCLAW_SPEC_VERSION, provider: config.provider.preset, model: config.provider.model, telegram: { enabled: config.telegram.enabled, groupMode: config.telegram.groupMode }, runtime: await runtimeStatus() }, null, 2));
 });
 
-program.command('logs').description('Show log placeholder').action(() => {
-  console.log('Logs are not implemented yet. Runtime log path will be ~/.zeroclaw/logs/zeroclaw.log');
+program.command('logs').description('Show runtime logs').option('--lines <n>', 'number of lines', '200').action(async (opts: { lines: string }) => {
+  await ensureWorkspace();
+  const logs = await runtimeLogs(Number(opts.lines) || 200);
+  for (const line of logs.lines) console.log(line);
 });
 
 program.command('update').description('Show update instructions').action(() => {
   console.log('Update after npm release: npm update -g zeroclaw');
+});
+
+
+const agent = program.command('agent').description('Inspect local agent identity and context');
+agent.command('identity').description('Show loaded agent identity').action(async () => {
+  await ensureWorkspace();
+  const cfg = await loadConfig();
+  const files = await loadAgentContext(cfg.agent.defaultAgent);
+  console.log(JSON.stringify(parseIdentity(files), null, 2));
+});
+agent.command('context').description('List loaded core context files').action(async () => {
+  await ensureWorkspace();
+  const cfg = await loadConfig();
+  const files = await loadAgentContext(cfg.agent.defaultAgent);
+  for (const file of files) console.log(`${file.name}	${file.content.length} chars	${file.path}`);
+});
+agent.command('prompt').description('Print assembled system prompt preview').option('--chars <n>', 'max characters', '4000').action(async (opts: { chars: string }) => {
+  await ensureWorkspace();
+  const cfg = await loadConfig();
+  const prompt = await loadAgentSystemPrompt(cfg.agent.defaultAgent, cfg.chat.systemPrompt);
+  console.log(prompt.slice(0, Number(opts.chars) || 4000));
 });
 
 const config = program.command('config').description('Read/write config');
@@ -61,9 +83,11 @@ config.command('set').argument('<key>').argument('<value>').action(() => {
   console.log('config set is not implemented yet; edit ~/.zeroclaw/zeroclaw.json for now.');
 });
 
-const service = program.command('service').description('Manage systemd service placeholder');
-for (const name of ['install', 'start', 'stop', 'restart', 'status']) {
-  service.command(name).action(() => console.log(`service ${name} is not implemented yet.`));
-}
+const service = program.command('service').description('Manage runtime service placeholder');
+service.command('start').action(async () => { await ensureWorkspace(); console.log(JSON.stringify(await startRuntime(), null, 2)); });
+service.command('stop').action(async () => { await ensureWorkspace(); console.log(JSON.stringify(await stopRuntime(), null, 2)); });
+service.command('restart').action(async () => { await ensureWorkspace(); console.log(JSON.stringify(await restartRuntime(), null, 2)); });
+service.command('status').action(async () => { await ensureWorkspace(); console.log(JSON.stringify(await runtimeStatus(), null, 2)); });
+service.command('install').action(() => console.log('service install is not implemented yet.'));
 
 await program.parseAsync(process.argv);
